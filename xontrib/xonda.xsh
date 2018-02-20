@@ -1,22 +1,14 @@
 import os
-import importlib
+from os.path import normcase, normpath
+import json
 from collections import namedtuple
 
 from xonsh.lazyasd import lazyobject
 
 @lazyobject
-def ci():
-    return importlib.import_module('conda.install')
-
-@lazyobject
 def config():
-    try:
-        # breaking changes introduced in Anaconda 4.4.7
-        # try to import newer library structure first
-        context = importlib.import_module('conda.base.context')
-        return context.context
-    except ModuleNotFoundError:
-        return importlib.import_module('conda.config')
+    cfg = json.loads($(conda info --json))
+    return cfg
 
 _Env = namedtuple('Env', ['name', 'path', 'bin_dir', 'envs_dir'])
 
@@ -35,7 +27,7 @@ def _get_envs():
     """
     # create the list of envrionments
     env_list = list()
-    for envs_dir in config.envs_dirs:
+    for envs_dir in config['envs_dirs']:
         # skip non-existing environments directories
         if not os.path.exists(envs_dir):
             continue
@@ -69,18 +61,30 @@ def _pick_env(env_name):
         envs_dir, env_name = os.path.split(env_name.rstrip(os.path.sep))
 
         env = _Env(name=env_name,
-                   path=os.path.join(envs_dir, env_name),
-                   bin_dir=os.path.join(envs_dir, env_name, 'bin'),
-                   envs_dir=envs_dir,
-                   )
+                  path=os.path.join(envs_dir, env_name),
+                  bin_dir=os.path.join(envs_dir, env_name, 'bin'),
+                  envs_dir=envs_dir,
+                 )
         # add the custom path to the envs_dirs so that the environment can
         # be deactivated again.
-        if envs_dir not in config.envs_dirs:
-            # extend envs_dirs tuple in config
-            config.envs_dirs += (envs_dir,)
+        $(conda config --append envs_dirs @(envs_dir))
         return env
     else:
         return False
+
+
+def _symlink_conda(prefix, root_dir):
+    if normcase(normpath(prefix)) in normcase(normpath(root_dir)):
+        return
+    prefix_where = os.path.join(prefix, 'bin')
+    if not os.path.isdir(prefix_where):
+        os.makedirs(prefix_where)
+    root_file = os.path.join(root_dir, 'bin', 'conda')
+    prefix_file = os.path.join(prefix_where, 'conda')
+    if os.path.lexists(prefix_file):
+        $(rm -f @(prefix_file))
+    if not os.path.lexists(prefix_file):
+        os.symlink(root_file, prefix_file)
 
 
 def _activate(env_name):
@@ -99,13 +103,15 @@ def _activate(env_name):
         $CONDA_PREFIX = env.path
         # copy current $PATH to backup envvar
         $_DEFAULT_CONDA_PATH = $PATH[:]
+        root_dir = config['root_prefix']
+        default_prefix = config['default_prefix']
         # delete any existing conda path
-        _ = [$PATH.remove(p) for p in $PATH if config.root_dir in p]
+        _ = [$PATH.remove(p) for p in $PATH if root_dir in p]
         # add the environment's bin dir in $PATH
         if env.bin_dir not in $PATH:
             $PATH.insert(0, env.bin_dir)
         # ensure conda symlink exists in directory
-        ci.symlink_conda(env.path, config.default_prefix)
+        _symlink_conda(env.path, default_prefix)
     else:
         print("No environment '{}' found".format(env_name))
 
@@ -126,7 +132,10 @@ def _xonda(args, stdin=None):
     """
     If command is neither _activate nor _deactivate, just shell out to conda"""
     if len(args) == 2 and args[0] in ['activate', 'select']:
-        _activate(args[1])
+        if args[1] == 'root':
+            _deactivate()
+        else:
+            _activate(args[1])
     elif len(args) == 1 and args[0] is 'deactivate':
         _deactivate()
     elif len(args) > 0:
